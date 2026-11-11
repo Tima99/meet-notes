@@ -51,7 +51,10 @@ export class IndexedDbTranscriptRepository implements TranscriptRepository {
         const meeting = (await promisifyRequest(meetings.get(meetingId))) as MeetingRecord | undefined;
         if (!meeting) continue;
         const speakers = [...meeting.speakers];
-        for (const s of added) if (!speakers.includes(s.speaker)) speakers.push(s.speaker);
+        // In order of first appearance in the conversation, whatever order the batch had.
+        for (const s of [...added].sort((x, y) => x.sequence - y.sequence)) {
+          if (!speakers.includes(s.speaker)) speakers.push(s.speaker);
+        }
         const updated: MeetingRecord = {
           ...meeting,
           segmentCount: meeting.segmentCount + added.length,

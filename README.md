@@ -2,7 +2,7 @@
 
 A privacy-first Chrome extension (MV3) that saves Google Meet transcripts from Meet's own live captions, with speaker names and timestamps. Everything stays in your browser: there is no server, no AI, no analytics, and no network access (`connect-src 'none'`).
 
-**Status:** Phases 1 (caption extraction) and 2 (IndexedDB persistence) are done. Phases 3–4 are still to do.
+**Status:** Phases 1 (caption extraction) and 2 (IndexedDB persistence) are done. The **web panel**, a site you can deploy to Vercel to preview and export saved meetings, is also built. The side panel's history view (Phase 3) is still to do.
 
 ## Architecture
 
@@ -73,13 +73,59 @@ Meet only puts caption text on the page while captions are **on**. So on Start, 
 
 You can switch this off with *Hide captions in Meet while capturing* in the side panel.
 
+## Web panel (Vercel)
+
+The web panel is a static site (`web/`, built to `dist-web/`) that lists your saved meetings, previews transcripts, and exports them as **TXT**, **JSON**, or **all meetings as JSON**.
+
+**How it gets the data.** A website can't read the extension's IndexedDB, because each origin's storage is private. Instead, the extension injects a small **bridge script only on the panel's configured address**. The page asks the bridge, the bridge asks the service worker, and the answer is posted back to the page:
+
+```
+web page ──postMessage──▶ web-bridge.js ──runtime.sendMessage──▶ background ──▶ IndexedDB
+```
+
+- Transcripts move only **inside your browser**. Vercel just serves the static files and never receives transcript data, and the site makes no network requests. Its CSP sets `connect-src 'self'` with no analytics.
+- The API is **read-only**: it can list meetings and get one meeting.
+- The service worker checks the sender's origin again, even though Chrome only injects the bridge on the configured origins.
+- In a browser without the extension (or with a build made for another address), the page shows "Extension not detected" and setup steps.
+
+**Allowed address.** Set it in `.env` before building the extension (see `.env.example`):
+
+```bash
+MEETNOTES_WEB_ORIGINS=https://your-project.vercel.app,http://localhost:5174
+```
+
+This must be the exact origin. Wildcards such as `*.vercel.app` are rejected, because they would let any Vercel site read your transcripts. If it isn't set, it defaults to `http://localhost:5174` for local testing. After changing it, run `npm run build` and reload the extension.
+
+### Try it locally
+
+```bash
+npm run build                          # extension, allowing http://localhost:5174
+npm run build:web && npm run web:preview   # serves the panel on http://localhost:5174
+```
+
+Reload the extension in `chrome://extensions`, then open http://localhost:5174.
+
+### Deploy to Vercel
+
+`vercel.json` holds the build settings (`npm run build:web` producing `dist-web/`) and strict security headers.
+
+1. Deploy with either option:
+   - **CLI:** `npx vercel login`, then from the project root `npx vercel --prod`. Accept the defaults; the settings come from `vercel.json`.
+   - **Git:** push the repo to GitHub and import it at vercel.com/new. Keep the root directory as the repo root.
+2. Copy the production URL, for example `https://meetnotes-yourname.vercel.app`.
+3. Put it in `.env` as `MEETNOTES_WEB_ORIGINS=https://meetnotes-yourname.vercel.app`, run `npm run build`, and reload the extension.
+4. Open the URL in the same Chrome profile. It should say **Extension connected** and list your meetings.
+
+Preview deployments get different URLs, so only the production URL you configured can read data.
+
 ## Permissions
 
 | Permission | Why |
 |---|---|
 | `sidePanel` | The UI |
 | `storage` | `chrome.storage.session` only, so an active capture survives service-worker restarts. It lives in memory, is never synced, and content scripts can't read it. |
-| content script on `https://meet.google.com/*` | Read captions. This is the only site access. |
+| content script on `https://meet.google.com/*` | Read captions |
+| content script on your web panel origin (`MEETNOTES_WEB_ORIGINS`) | The read-only bridge that lets your own panel load your saved meetings |
 
 The extension does **not** request `tabs`, `scripting`, `activeTab`, `<all_urls>`, or any host permissions. IndexedDB (Phase 2) needs no permission.
 
@@ -99,7 +145,7 @@ tests/           Vitest unit tests + jsdom Meet simulation (tests/fixtures/fake-
 
 ```bash
 npm install
-npm test          # 98 tests: tracker, parser, observer, detector, sink, controller, end-to-end simulation
+npm test          # 112 tests: tracker, parser, observer, detector, sink, controller, end-to-end simulation
 npm run build     # typecheck + build into dist/
 npm run dev       # rebuild on change
 ```
