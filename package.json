@@ -1,0 +1,30 @@
+{
+  "name": "meetnotes",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Privacy-first Google Meet caption transcriber (Chrome MV3 extension)",
+  "type": "module",
+  "scripts": {
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "npm run clean && npm run typecheck && vite build && vite build --config vite.content.config.ts",
+    "dev": "npm run clean && (vite build --watch --mode development & vite build --config vite.content.config.ts --watch --mode development)",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.3.7",
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "jsdom": "^31.0.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.0"
+  }
+}
