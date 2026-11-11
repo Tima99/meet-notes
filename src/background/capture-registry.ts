@@ -61,6 +61,10 @@ export class CaptureRegistry {
     return this.captures.get(tabId)?.meetingId ?? this.lastMeetingByTab.get(tabId) ?? null;
   }
 
+  activeMeetingIds(): Set<string> {
+    return new Set([...this.captures.values()].map((c) => c.meetingId));
+  }
+
   activeTabIds(): number[] {
     return [...this.captures.keys()];
   }

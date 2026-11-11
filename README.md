@@ -2,7 +2,7 @@
 
 A privacy-first Chrome extension (MV3) that saves Google Meet transcripts from Meet's own live captions, with speaker names and timestamps. Everything stays in your browser: there is no server, no AI, no analytics, and no network access (`connect-src 'none'`).
 
-**Status:** Phase 1 (extension skeleton + caption extraction) is done. Phases 2–4 are still to do.
+**Status:** Phases 1 (caption extraction) and 2 (IndexedDB persistence) are done. Phases 3–4 are still to do.
 
 ## Architecture
 
@@ -24,7 +24,7 @@ A privacy-first Chrome extension (MV3) that saves Google Meet transcripts from M
                          chrome.runtime messages                 │
 ┌──────────────── service worker (background) ───────────────────▼─────┐
 │  CaptureService ── CaptureRegistry (chrome.storage.session)          │
-│        │        ── SegmentStore  (P1: memory → P2: IndexedDB)        │
+│        │        ── TranscriptService / MeetingService → IndexedDB   │
 │        │        ── badge "REC"                                       │
 │        └──── PanelHub (ports) ──▶ side panel (React)                 │
 └──────────────────────────────────────────────────────────────────────┘
@@ -37,7 +37,9 @@ A privacy-first Chrome extension (MV3) that saves Google Meet transcripts from M
 | Caption parser | `src/content/captions/caption-parser.ts` | Caption element → `{speaker, text}`, with a structural fallback |
 | Caption tracker | `src/content/captions/caption-tracker.ts` | Snapshots → segments with unique IDs and ordering; handles dedupe and finalization |
 | Selectors | `src/content/captions/selectors.ts` | **Every Meet DOM dependency in one place** |
-| Transcript service, IndexedDB repository, meeting service | Phase 2 | — |
+| Transcript service | `src/background/transcript-service.ts` | Saves segments; interim segments are checkpointed, newer revisions win |
+| Meeting service | `src/background/meeting-service.ts` | Meeting lifecycle: start, end, and recovery after a crash |
+| IndexedDB repositories | `src/shared/db/` | Schema, promise wrapper, and `meetings` / `transcripts` repositories |
 | Export service | Phase 4 | — |
 
 ### How caption tracking works
@@ -97,7 +99,7 @@ tests/           Vitest unit tests + jsdom Meet simulation (tests/fixtures/fake-
 
 ```bash
 npm install
-npm test          # 85 tests: tracker, parser, observer, detector, sink, controller, end-to-end simulation
+npm test          # 98 tests: tracker, parser, observer, detector, sink, controller, end-to-end simulation
 npm run build     # typecheck + build into dist/
 npm run dev       # rebuild on change
 ```
@@ -126,13 +128,38 @@ To see logs, open DevTools on the Meet tab, pick the **MeetNotes** content-scrip
 | 12 | Start again, then leave the call | Capture stops automatically after about 3 s. |
 | 13 | Reload the extension while capturing | The pill disappears from the old tab. Refresh the tab to use MeetNotes again. |
 
-**Known Phase 1 limitation:** segments are kept in the service worker's memory, so they are lost when Chrome suspends it after a long idle period. Phase 2 fixes this with IndexedDB.
+## Phase 2: persistence
+
+Database `meetnotes` (IndexedDB, in the extension's own origin, never synced):
+
+| Store | Key | Indexes |
+|---|---|---|
+| `meetings` | `id` | `startedAt`, `status` |
+| `transcripts` | `id` (segment ID) | `meetingId`, `timestamp` (segment `startedAt`), `meetingId_sequence` (ordered reads) |
+
+- **Final segments** are written as soon as they reach the service worker. **Interim segments** are written too, as checkpoints, so a crash mid-sentence keeps the words captured so far. A segment with a higher `revision` always replaces the stored one, and an older one is ignored.
+- **Nothing is dropped silently.** The content script keeps each segment queued until the service worker replies that the write has committed, and retries if it fails.
+- **The meeting row is created before capture starts**, so the first segment always has a meeting to belong to. The meeting's segment count and speaker list are updated in the same transaction as the segments.
+- **Crash or browser restart:** each time the service worker starts, any meeting still marked `active` that nothing is capturing is closed as `interrupted`, ended at its last activity, and its interim segments are marked final.
+
+### Phase 2: manual test plan
+
+You can inspect the data in DevTools. Open `chrome://extensions`, click **service worker** on the MeetNotes card, go to **Application**, then **IndexedDB**, then **meetnotes**.
+
+| # | Scenario | Expected |
+|---|---|---|
+| 1 | Capture for a while, then close and reopen the side panel | The transcript is still there |
+| 2 | Mid-meeting, stop the service worker (Application → Service workers → **Stop**) and keep talking | The earlier transcript is kept and new segments keep arriving |
+| 3 | Press Stop, then check `meetings` | `status: ended`, `endReason: user-stopped`, the right `segmentCount` and `speakers` |
+| 4 | Close Chrome mid-meeting, then reopen it and open the service worker DevTools | The meeting shows `endReason: interrupted` and all its segments are `final` |
+| 5 | Reload the extension mid-meeting | The data saved so far is still in IndexedDB. The meeting is closed as `interrupted`. |
+| 6 | A one-hour meeting | `transcripts` grows steadily, and the side panel stays responsive |
 
 **If captions aren't detected** (the pill stays amber while captions are visible), Meet has probably changed its DOM. Inspect the captions area and update `src/content/captions/selectors.ts`. A `strategy.changed → structural` warning in the console means the fallback parser is in use.
 
 ## Roadmap
 
 1. ~~Extension + caption extraction~~
-2. IndexedDB (`meetings` and `transcripts` stores, indexed on `meetingId`, `timestamp`, `startedAt`). A transcript service and meeting service will save final segments immediately and checkpoint interim ones.
+2. ~~IndexedDB persistence~~
 3. React side panel: dashboard, meeting history, transcript viewer
 4. TXT and JSON export

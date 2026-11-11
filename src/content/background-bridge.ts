@@ -1,5 +1,5 @@
 import { createLogger, errorMessage, type Logger } from '../shared/logger';
-import { isContentCommand, type ContentCommand, type ContentEvent } from '../shared/messages';
+import { isContentCommand, isResult, type ContentCommand, type ContentEvent } from '../shared/messages';
 
 export type CommandHandler = (command: ContentCommand) => Promise<unknown>;
 
@@ -31,14 +31,17 @@ export class ChromeBackgroundBridge implements BackgroundBridge {
 
   async send(event: ContentEvent): Promise<void> {
     if (!this.isContextValid()) throw new ExtensionContextInvalidatedError();
+    let response: unknown;
     try {
-      await chrome.runtime.sendMessage(event);
+      response = await chrome.runtime.sendMessage(event);
     } catch (error) {
       if (!this.isContextValid() || /context invalidated/i.test(errorMessage(error))) {
         throw new ExtensionContextInvalidatedError();
       }
       throw error;
     }
+    // The worker answers {ok:false} when it could not persist: report it so the sink retries.
+    if (isResult(response) && !response.ok) throw new Error(`Background rejected ${event.type}: ${response.error}`);
   }
 
   onCommand(handler: CommandHandler): void {

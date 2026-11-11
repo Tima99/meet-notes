@@ -49,7 +49,7 @@ export function App() {
       <Transcript segments={capture.segments} />
       {capture.state?.contentReady && <Diagnostics tabId={capture.state.tabId} />}
 
-      <footer className="footer">Everything stays in this browser. Phase 1 keeps the transcript in memory only.</footer>
+      <footer className="footer">Everything stays in this browser. Transcripts are saved automatically on this device.</footer>
     </div>
   );
 }

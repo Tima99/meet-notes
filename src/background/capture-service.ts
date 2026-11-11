@@ -11,8 +11,9 @@ import type { CaptionLanguageInfo, CaptureEndReason } from '../shared/types';
 import { setCaptureBadge } from './badge';
 import type { CaptureRegistry } from './capture-registry';
 import type { PanelHub } from './panel-hub';
-import type { SegmentStore } from './segment-store';
+import type { MeetingService } from './meeting-service';
 import type { SettingsStore } from './settings-store';
+import type { TranscriptService } from './transcript-service';
 
 /** A content status saying "not capturing" only ends a session older than this (start race). */
 const START_RACE_GRACE_MS = 3000;
@@ -33,7 +34,8 @@ export class CaptureService {
 
   constructor(
     private readonly registry: CaptureRegistry,
-    private readonly store: SegmentStore,
+    private readonly transcripts: TranscriptService,
+    private readonly meetings: MeetingService,
     private readonly hub: PanelHub,
     private readonly settings: SettingsStore,
     private readonly tabs: TabMessenger = chromeTabMessenger,
@@ -49,7 +51,7 @@ export class CaptureService {
     const meetingId = this.registry.getDisplayMeetingId(tabId);
     return {
       state: this.registry.getState(tabId),
-      segments: meetingId ? await this.store.listByMeeting(meetingId) : [],
+      segments: meetingId ? await this.transcripts.list(meetingId) : [],
     };
   }
 
@@ -62,10 +64,20 @@ export class CaptureService {
     const meetingId = crypto.randomUUID();
     const startedAt = this.now();
     const settings = await this.settings.get();
+    const page = this.registry.getState(tabId).page;
     this.pendingStarts.set(tabId, meetingId);
     try {
-      const report = await this.command(tabId, { type: 'content/start-capture', meetingId, startedAt, settings });
+      // The meeting row exists before the first segment can possibly arrive.
+      await this.meetings.start({ meetingId, meetCode: page?.meetCode ?? null, title: page?.title ?? null, startedAt });
+      let report: ContentStatusReport;
+      try {
+        report = await this.command(tabId, { type: 'content/start-capture', meetingId, startedAt, settings });
+      } catch (error) {
+        await this.meetings.discard(meetingId).catch(() => undefined);
+        throw error;
+      }
       this.registry.setPage(tabId, report.page, true);
+      await this.meetings.describe(meetingId, report.page.meetCode, report.page.title);
       await this.registry.startSession({
         meetingId,
         tabId,
@@ -124,6 +136,12 @@ export class CaptureService {
     return settings;
   }
 
+  /** Startup: close meetings left "active" by a crash or browser restart. */
+  async recover(): Promise<void> {
+    await this.registry.whenReady();
+    await this.meetings.recoverInterrupted(this.registry.activeMeetingIds());
+  }
+
   // ── content events ───────────────────────────────────────────────────────
 
   async handleContentEvent(tabId: number, event: ContentEvent): Promise<void> {
@@ -133,11 +151,12 @@ export class CaptureService {
         await this.reconcile(tabId, event.report);
         return;
       case 'content/segments':
-        await this.store.upsert(event.segments);
+        // Throws on failure → the content script keeps the segments queued and retries.
+        await this.transcripts.save(event.segments);
         this.hub.broadcast({ type: 'bg/segments', tabId, segments: event.segments });
         return;
       case 'content/capture-ended':
-        await this.endSession(tabId, event.reason, event.meetingId);
+        await this.endSession(tabId, event.reason, event.meetingId, event.endedAt);
         return;
     }
   }
@@ -172,6 +191,12 @@ export class CaptureService {
     } else if (content && (!session || session.meetingId !== content.meetingId)) {
       // Content is capturing something we don't know about (SW state lost): adopt it.
       if (session) await this.endSession(tabId, 'error');
+      await this.meetings.start({
+        meetingId: content.meetingId,
+        meetCode: report.page.meetCode,
+        title: report.page.title,
+        startedAt: content.startedAt,
+      });
       await this.registry.startSession({
         meetingId: content.meetingId,
         tabId,
@@ -189,9 +214,17 @@ export class CaptureService {
     this.pushState(tabId);
   }
 
-  private async endSession(tabId: number, reason: CaptureEndReason, meetingId?: string): Promise<void> {
+  private async endSession(
+    tabId: number,
+    reason: CaptureEndReason,
+    meetingId?: string,
+    endedAt: number = this.now(),
+  ): Promise<void> {
     const ended = await this.registry.endSession(tabId, meetingId);
     if (!ended) return;
+    await this.meetings.end(ended.meetingId, reason, endedAt).catch((error: unknown) => {
+      this.logger.error('meeting.end-failed', { meetingId: ended.meetingId, error });
+    });
     await setCaptureBadge(tabId, false);
     this.logger.info('capture.ended', { tabId, meetingId: ended.meetingId, reason });
     this.pushState(tabId);
