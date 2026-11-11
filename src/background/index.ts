@@ -5,6 +5,7 @@
  */
 import { createLogger, errorMessage } from '../shared/logger';
 import { fail, isContentEvent, isPanelRequest, ok, type PanelRequest, type Result } from '../shared/messages';
+import { isBackgroundWebRequest } from '../shared/web-protocol';
 import { CaptureRegistry } from './capture-registry';
 import { CaptureService } from './capture-service';
 import { PanelHub } from './panel-hub';
@@ -14,6 +15,7 @@ import { IndexedDbTranscriptRepository } from '../shared/db/transcript-repositor
 import { MeetingService } from './meeting-service';
 import { SettingsStore } from './settings-store';
 import { TranscriptService } from './transcript-service';
+import { isAllowedWebOrigin, WebApi } from './web-api';
 
 const logger = createLogger('background');
 const MEET_ORIGIN = 'https://meet.google.com';
@@ -43,6 +45,8 @@ const transcripts = new TranscriptService(new IndexedDbTranscriptRepository(data
 const meetings = new MeetingService(new IndexedDbMeetingRepository(database), transcripts, Date.now, logger.child('meetings'));
 const service = new CaptureService(registry, transcripts, meetings, hub, new SettingsStore(chrome.storage.local));
 
+const webApi = new WebApi(meetings, transcripts);
+
 // Every service-worker start: close meetings a crash/browser restart left "active".
 service.recover().catch((error: unknown) => logger.error('recover.failed', { error }));
 
@@ -68,6 +72,19 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
       .then(() => sendResponse(ok(null)))
       .catch((error: unknown) => {
         logger.error('content-event.failed', { type: message.type, error });
+        sendResponse(fail(errorMessage(error)));
+      });
+    return true;
+  }
+
+  // Read-only requests from the MeetNotes web panel (via the bridge content script).
+  if (isBackgroundWebRequest(message)) {
+    if (sender.tab === undefined || !isAllowedWebOrigin(sender.origin, __MEETNOTES_WEB_ORIGINS__)) return false;
+    webApi
+      .handle(message.request)
+      .then(sendResponse)
+      .catch((error: unknown) => {
+        logger.error('web-request.failed', { type: message.request.type, error });
         sendResponse(fail(errorMessage(error)));
       });
     return true;
